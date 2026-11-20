@@ -175,8 +175,9 @@ func (a *appState) layout() {
 	a.formLeft, a.formWidth = left+lw+a.s(23), mainWidth-lw-a.s(23)
 	saveTop := a.footerTop - a.s(g.saveGap)
 	p(idProfiles, left, a.s(g.list), lw, saveTop-a.s(g.list+16))
-	p(idUp, left, saveTop, a.s(66), a.s(g.buttonHeight))
-	p(idDown, left+a.s(73), saveTop, a.s(66), a.s(g.buttonHeight))
+	p(idUp, left, saveTop, a.s(60), a.s(g.buttonHeight))
+	p(idDown, left+a.s(66), saveTop, a.s(60), a.s(g.buttonHeight))
+	p(idDuplicate, left+a.s(132), saveTop, min(a.s(72), lw-a.s(132)), a.s(g.buttonHeight))
 	p(idNew, left, a.s(g.listActions), a.s(54), a.s(34))
 	p(idDiscover, left+a.s(60), a.s(g.listActions), lw-a.s(60), a.s(34))
 	fx, fw := a.formLeft, a.formWidth
@@ -185,6 +186,7 @@ func (a *appState) layout() {
 	p(idBrowse, right-a.s(60), a.s(g.exe-1), a.s(60), a.s(g.editHeight+2))
 	p(idArgs, fx, a.s(g.args), fw, max(a.s(22), saveTop-a.s(g.args+9)))
 	p(idRemove, right-a.s(148), saveTop, a.s(67), a.s(g.buttonHeight))
+	p(idCancelDuplicate, right-a.s(186), saveTop, a.s(105), a.s(g.buttonHeight))
 	p(idSave, right-a.s(72), saveTop, a.s(72), a.s(g.buttonHeight))
 	p(idUnregister, right-a.s(164), a.footerTop+a.s(footerButtonTop), a.s(164), a.s(footerButtonHeight))
 }
@@ -385,7 +387,11 @@ func (a *appState) paintSettings(dc uintptr, left, right int32, compact bool) {
 		subtop, subheight = 70, 21
 	}
 	a.text(dc, a.rect(left, a.s(subtop), right-left, a.s(subheight)), "ブラウザーやプロファイルを追加して、リンクの開き先を選べます。", fontBody, muted, dtSingleLine|dtVCenter|dtEllipsis)
-	a.text(dc, a.rect(fx, a.s(g.nameLabel), fw, a.s(23)), "表示名", fontSection, ink, dtSingleLine|dtVCenter)
+	nameLabel := "表示名"
+	if a.duplicating {
+		nameLabel = "表示名（複製）"
+	}
+	a.text(dc, a.rect(fx, a.s(g.nameLabel), fw, a.s(23)), nameLabel, fontSection, ink, dtSingleLine|dtVCenter)
 	a.text(dc, a.rect(fx, a.s(g.exeLabel), fw, a.s(23)), "実行ファイル (.exe)", fontSection, ink, dtSingleLine|dtVCenter)
 	a.text(dc, a.rect(fx, a.s(g.argsLabel), fw, a.s(22)), "起動引数（任意）", fontSection, ink, dtSingleLine|dtVCenter)
 	a.text(dc, a.rect(fx, a.s(g.argsHelp), fw, a.s(23)), "1行に1引数。{url} はリンクに置換。", fontSmall, muted, dtWordBreak)
