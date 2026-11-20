@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -34,12 +36,16 @@ const (
 	idUp
 	idDown
 	idUnregister
+	idDuplicate
+	idCancelDuplicate
 )
 
 const (
 	pageOpen = iota
 	pageSettings
 )
+
+const profileNameLimit = 200 // UTF-16 code units in the native edit control.
 
 type appState struct {
 	hwnd, instance uintptr
@@ -48,7 +54,8 @@ type appState struct {
 	controls       map[int]uintptr
 	cfg            core.Config
 	configOK       bool
-	editing        int
+	editing        int // Source profile while duplicating; otherwise the profile being edited.
+	duplicating    bool
 	dirty          bool
 	filling        bool
 	status         string
@@ -226,7 +233,9 @@ func (a *appState) initControls() {
 	a.button(idUp, "上へ")
 	a.button(idDown, "下へ")
 	a.button(idUnregister, "既定候補から解除")
-	for _, limit := range []struct{ id, max int }{{idURL, 32766}, {idName, 200}, {idExecutable, 32766}, {idArgs, 16384}} {
+	a.button(idDuplicate, "複製")
+	a.button(idCancelDuplicate, "キャンセル")
+	for _, limit := range []struct{ id, max int }{{idURL, 32766}, {idName, profileNameLimit}, {idExecutable, 32766}, {idArgs, 16384}} {
 		send.Call(a.controls[limit.id], emSetLimit, uintptr(limit.max), 0)
 	}
 	// Native edit cue banner strings; not persisted.
@@ -246,13 +255,16 @@ func (a *appState) initControls() {
 }
 
 var openControls = []int{idURL, idCopy, idChooser, idCancel}
-var settingsControls = []int{idProfiles, idNew, idDiscover, idName, idExecutable, idBrowse, idArgs, idSave, idRemove, idUp, idDown, idUnregister}
+var settingsControls = []int{idNew, idDiscover, idProfiles, idUp, idDown, idDuplicate, idName, idExecutable, idBrowse, idArgs, idRemove, idCancelDuplicate, idSave, idUnregister}
 
 func (a *appState) refreshPage() {
 	for _, id := range openControls {
 		setVisible(a.controls[id], a.page == pageOpen && (id != idChooser || len(a.cfg.Browsers) > 0))
 	}
 	for _, id := range settingsControls {
+		if id == idRemove || id == idCancelDuplicate {
+			continue // These share the same space; updateControls chooses which to show.
+		}
 		setVisible(a.controls[id], a.page == pageSettings && (id != idProfiles || len(a.cfg.Browsers) > 0))
 	}
 	for _, id := range []int{idOpen, idSettings, idDefaults} {
@@ -272,9 +284,13 @@ func (a *appState) updateControls() {
 	for _, id := range []int{idNew, idDiscover, idName, idExecutable, idBrowse, idArgs, idSave} {
 		setEnabled(a.controls[id], a.configOK)
 	}
-	setEnabled(a.controls[idRemove], a.configOK && a.editing >= 0)
-	setEnabled(a.controls[idUp], a.configOK && a.editing > 0)
-	setEnabled(a.controls[idDown], a.configOK && a.editing >= 0 && a.editing < len(a.cfg.Browsers)-1)
+	hasSelection := a.configOK && !a.duplicating && a.editing >= 0 && a.editing < len(a.cfg.Browsers)
+	setEnabled(a.controls[idDuplicate], hasSelection)
+	setEnabled(a.controls[idRemove], hasSelection)
+	setEnabled(a.controls[idUp], hasSelection && a.editing > 0)
+	setEnabled(a.controls[idDown], hasSelection && a.editing < len(a.cfg.Browsers)-1)
+	setVisible(a.controls[idRemove], a.page == pageSettings && !a.duplicating)
+	setVisible(a.controls[idCancelDuplicate], a.page == pageSettings && a.duplicating)
 }
 
 func (a *appState) refreshLists(choose, settings int) {
@@ -306,6 +322,9 @@ func (a *appState) switchPage(page int) {
 		return
 	}
 	if a.dirty {
+		if a.duplicating {
+			selectItem(a.controls[idProfiles], a.editing)
+		}
 		a.fillForm(a.editing)
 	}
 	a.page = page
@@ -447,6 +466,10 @@ func (a *appState) click(id int) {
 		}
 	case idSave:
 		a.save()
+	case idDuplicate:
+		a.duplicate()
+	case idCancelDuplicate:
+		a.cancelDuplicate()
 	case idRemove:
 		a.remove()
 	case idUp:
@@ -485,17 +508,76 @@ func (a *appState) confirmDiscard() bool {
 
 func (a *appState) fillForm(index int) {
 	a.editing = index
-	a.filling = true
+	a.duplicating = false
 	var b core.Browser
 	if index >= 0 && index < len(a.cfg.Browsers) {
 		b = a.cfg.Browsers[index]
 	}
+	a.writeForm(b, false)
+}
+
+func (a *appState) writeForm(b core.Browser, dirty bool) {
+	a.filling = true
 	writeText(a.controls[idName], b.Name)
 	writeText(a.controls[idExecutable], b.Executable)
 	writeText(a.controls[idArgs], strings.Join(b.Args, "\r\n"))
-	a.filling, a.dirty = false, false
+	a.filling, a.dirty = false, dirty
 	a.updateControls()
 	invalidate.Call(a.hwnd, 0, 0)
+}
+
+func (a *appState) duplicate() {
+	if a.page != pageSettings || !a.configOK || a.duplicating || a.editing < 0 || a.editing >= len(a.cfg.Browsers) || !a.confirmDiscard() {
+		return
+	}
+	b := a.cfg.Browsers[a.editing]
+	b.Name = duplicateName(b.Name, a.cfg.Browsers)
+	a.duplicating = true
+	selectItem(a.controls[idProfiles], -1)
+	a.writeForm(b, true)
+	setFocus.Call(a.controls[idName])
+	send.Call(a.controls[idName], 0x00b1, 0, ^uintptr(0)) // Select the suggested name for easy replacement.
+	a.notify("複製した設定を確認し、別の設定として保存してください。", false)
+}
+
+func duplicateName(name string, browsers []core.Browser) string {
+	used := make(map[string]bool, len(browsers))
+	for _, b := range browsers {
+		used[strings.ToLower(strings.TrimSpace(b.Name))] = true
+	}
+	name = strings.TrimSpace(name)
+	for i := 1; ; i++ {
+		suffix := " (コピー)"
+		if i > 1 {
+			suffix = " (コピー " + strconv.Itoa(i) + ")"
+		}
+		budget := profileNameLimit - len([]rune(suffix)) // Every rune in the suffix is one UTF-16 code unit.
+		prefix := name
+		for at, r := range name {
+			budget--
+			if r > 0xffff { // Supplementary characters take a UTF-16 surrogate pair.
+				budget--
+			}
+			if budget < 0 {
+				prefix = strings.TrimSpace(name[:at])
+				break
+			}
+		}
+		candidate := prefix + suffix
+		if !used[strings.ToLower(candidate)] {
+			return candidate
+		}
+	}
+}
+
+func (a *appState) cancelDuplicate() {
+	if !a.duplicating {
+		return
+	}
+	selectItem(a.controls[idProfiles], a.editing)
+	a.fillForm(a.editing)
+	setFocus.Call(a.controls[idProfiles])
+	a.notify("", false)
 }
 
 func (a *appState) store(browsers []core.Browser, at int, success string) bool {
@@ -525,38 +607,57 @@ func (a *appState) save() {
 		return
 	}
 	b := core.Browser{Name: strings.TrimSpace(readText(a.controls[idName])), Executable: strings.TrimSpace(readText(a.controls[idExecutable]))}
-	for _, arg := range strings.Split(strings.ReplaceAll(readText(a.controls[idArgs]), "\r\n", "\n"), "\n") {
-		if arg != "" {
-			b.Args = append(b.Args, arg)
+	at := a.editing
+	argsText := strings.ReplaceAll(readText(a.controls[idArgs]), "\r\n", "\n")
+	if at >= 0 && argsText == strings.Join(a.cfg.Browsers[at].Args, "\n") {
+		// An existing file can contain explicit empty arguments. Preserve the
+		// exact argv when the argument text hasn't changed.
+		b.Args = slices.Clone(a.cfg.Browsers[at].Args)
+	} else {
+		for _, arg := range strings.Split(argsText, "\n") {
+			if arg != "" {
+				b.Args = append(b.Args, arg)
+			}
 		}
 	}
-	if a.editing >= 0 {
-		b.ID = a.cfg.Browsers[a.editing].ID
+	if a.duplicating {
+		at = -1
+	}
+	if at >= 0 {
+		b.ID = a.cfg.Browsers[at].ID
 	} else {
-		id, err := core.NewBrowserID()
-		if err != nil {
-			a.notify("ブラウザーIDを作成できませんでした。", true)
-			return
+		for {
+			id, err := core.NewBrowserID()
+			if err != nil {
+				a.notify("ブラウザーIDを作成できませんでした。", true)
+				return
+			}
+			if !slices.ContainsFunc(a.cfg.Browsers, func(b core.Browser) bool { return b.ID == id }) {
+				b.ID = id
+				break
+			}
 		}
-		b.ID = id
 	}
 	if err := core.ValidateBrowser(b); err != nil {
 		dlg(a.hwnd, "入力内容を確認", "表示名、実行ファイル、起動引数を確認してください。\n\n"+err.Error(), mbError)
 		return
 	}
 	next := append([]core.Browser(nil), a.cfg.Browsers...)
-	at := a.editing
+	success := "ブラウザー設定を保存しました。"
+	if a.duplicating {
+		success = "ブラウザー設定を複製しました。"
+	}
 	if at < 0 {
 		at = len(next)
 		next = append(next, b)
 	} else {
 		next[at] = b
 	}
-	a.store(next, at, "ブラウザー設定を保存しました。")
+	a.store(next, at, success)
 }
 
 func (a *appState) remove() {
-	if !a.configOK || a.editing < 0 {
+	if !a.configOK || a.duplicating || a.editing < 0 {
 		return
 	}
 	if dlg(a.hwnd, "ブラウザー設定の削除", "このブラウザー設定を一覧から削除しますか？\nブラウザー本体やプロファイルのデータは削除しません。", mbYesNo|mbWarning|mbDefaultNo) != idYes {
@@ -570,7 +671,7 @@ func (a *appState) remove() {
 
 func (a *appState) reorder(delta int) {
 	from, to := a.editing, a.editing+delta
-	if !a.configOK || from < 0 || to < 0 || to >= len(a.cfg.Browsers) || !a.confirmDiscard() {
+	if !a.configOK || a.duplicating || from < 0 || to < 0 || to >= len(a.cfg.Browsers) || !a.confirmDiscard() {
 		return
 	}
 	next := append([]core.Browser(nil), a.cfg.Browsers...)
@@ -765,14 +866,18 @@ func windowProc(hwnd uintptr, message uint32, w, l uintptr) uintptr {
 			a.launchSelected()
 		case id == idProfiles && code == lbnSelChange:
 			index := selected(a.controls[idProfiles])
-			if index != a.editing {
+			if a.duplicating || index != a.editing {
 				if a.confirmDiscard() {
 					a.fillForm(index)
 					if a.configOK {
 						a.notify("", false)
 					}
 				} else {
-					selectItem(a.controls[idProfiles], a.editing)
+					if a.duplicating {
+						selectItem(a.controls[idProfiles], -1)
+					} else {
+						selectItem(a.controls[idProfiles], a.editing)
+					}
 				}
 			}
 		case code == 0:
