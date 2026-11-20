@@ -56,6 +56,6 @@ scoop update
 scoop install sh4869221b/linkswitch
 ```
 
-未追加の場合は、先に `scoop bucket add sh4869221b https://github.com/sh4869221b/scoop-bucket` を実行してください。アプリのリポジトリは非公開のため、Scoop 0.6.0 では LinkSwitch リポジトリの Contents 読み取り権限を持つ GitHub トークンを、Scoop の `SCOOP_GH_TOKEN` 環境変数などで利用できるようにしてください。トークンをマニフェストやチャットに記載しないでください。
+未追加の場合は、先に `scoop bucket add sh4869221b https://github.com/sh4869221b/scoop-bucket` を実行してください。
 
 Scoop はインストール時に Windows の既定アプリを変更しません。インストール後、LinkSwitch の **既定ブラウザー設定**で登録を行ってください。Scoop の `current` が有効な通常構成なら、更新後も同じ登録パスが使われます。
