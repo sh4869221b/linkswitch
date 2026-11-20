@@ -42,3 +42,20 @@ UI は画像生成で作成したデザイン案を元に、左サイドバー�
 Linux / macOS から同じ Windows 用バイナリをクロスビルドする場合は `sh scripts/build.sh` を実行します。Windows 以外で動くアプリは生成しません。
 
 同梱される Go ランタイム・標準ライブラリのライセンスは [Go のライセンス](docs/GO-LICENSE.txt) を参照してください。
+
+## CI リリース
+
+GitHub の **Actions → Release LinkSwitch → Run workflow** を開き、ブランチ `main` と未使用のバージョン（例: `v0.1.2`）を指定し、公開する場合は publish をオンにします。Windows CI がソースをテストし、amd64・arm64 の EXE と SHA-256 一覧を GitHub Releases に登録します。既存リリースは上書きしません。
+
+## Scoop
+
+既に Scoop bucket を追加済みなら、PowerShell で次を実行します。
+
+```powershell
+scoop update
+scoop install sh4869221b/linkswitch
+```
+
+未追加の場合は、先に `scoop bucket add sh4869221b https://github.com/sh4869221b/scoop-bucket` を実行してください。アプリのリポジトリは非公開のため、Scoop 0.6.0 では LinkSwitch リポジトリの Contents 読み取り権限を持つ GitHub トークンを、Scoop の `SCOOP_GH_TOKEN` 環境変数などで利用できるようにしてください。トークンをマニフェストやチャットに記載しないでください。
+
+Scoop はインストール時に Windows の既定アプリを変更しません。インストール後、LinkSwitch の **既定ブラウザー設定**で登録を行ってください。Scoop の `current` が有効な通常構成なら、更新後も同じ登録パスが使われます。

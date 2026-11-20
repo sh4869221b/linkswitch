@@ -1,0 +1,127 @@
+name: Release LinkSwitch
+
+# Publish only from an explicit run on the default branch. A tag does not
+# trigger a workflow, because a tag may point to an arbitrary workflow file.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example, v0.1.1)"
+        required: true
+        type: string
+      publish:
+        description: "Create a new GitHub Release (otherwise build artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linkswitch-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-2025
+    timeout-minutes: 15
+    outputs:
+      artifact_id: ${{ steps.bundle.outputs.artifact-id }}
+    steps:
+      - name: Validate release request
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::The release version must be a stable vMAJOR.MINOR.PATCH tag."
+            exit 1
+          fi
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.4"
+          cache: false
+      - run: go test ./...
+      - run: go vet ./...
+      - run: ./scripts/build.ps1
+      - run: ./scripts/smoke-windows.ps1
+      - name: Add the Go runtime license and checksum
+        run: |
+          $goRoot = go env GOROOT
+          if ($LASTEXITCODE -ne 0) { throw "Could not find the Go toolchain" }
+          $license = "dist/GO-LICENSE.txt"
+          Copy-Item -LiteralPath (Join-Path $goRoot LICENSE) -Destination $license
+          $hash = (Get-FileHash -LiteralPath $license -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  GO-LICENSE.txt" | Add-Content -Encoding ascii dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: bundle
+        with:
+          name: LinkSwitch-${{ github.run_attempt }}
+          path: |
+            dist/LinkSwitch-windows-amd64.exe
+            dist/LinkSwitch-windows-arm64.exe
+            dist/SHA256SUMS.txt
+            dist/GO-LICENSE.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: release-assets
+      - name: Verify packaged files
+        working-directory: release-assets
+        shell: bash
+        run: |
+          for file in LinkSwitch-windows-amd64.exe LinkSwitch-windows-arm64.exe GO-LICENSE.txt SHA256SUMS.txt; do
+            [[ -f "$file" && ! -L "$file" && -s "$file" ]]
+          done
+          printf "%s\n" GO-LICENSE.txt LinkSwitch-windows-amd64.exe LinkSwitch-windows-arm64.exe > "$RUNNER_TEMP/linkswitch-expected-files"
+          awk '{ sub(/\r$/, "", $2); print $2 }' SHA256SUMS.txt | LC_ALL=C sort | diff - "$RUNNER_TEMP/linkswitch-expected-files"
+          sha256sum --strict -c SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create a new GitHub Release
+        working-directory: release-assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          # Listing includes drafts (unlike querying only the published release by tag).
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' > "$RUNNER_TEMP/linkswitch-existing-releases"
+          if grep -Fxq -- "$VERSION" "$RUNNER_TEMP/linkswitch-existing-releases"; then
+            echo "::error::A draft or published release already uses this version. It was not changed."
+            exit 1
+          fi
+          # Creating the tag rather than updating it prevents reusing an existing
+          # tag that could point at a different commit from the tested binaries.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$VERSION" -f "sha=$GITHUB_SHA" > /dev/null
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "LinkSwitch $VERSION" --generate-notes \
+            LinkSwitch-windows-amd64.exe LinkSwitch-windows-arm64.exe SHA256SUMS.txt GO-LICENSE.txt
+          release="$RUNNER_TEMP/linkswitch-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > "$release"
+          jq -e --arg tag "$VERSION" '.tag_name == $tag and .draft == false and (.assets | length) == 4' "$release" > /dev/null
+          for file in LinkSwitch-windows-amd64.exe LinkSwitch-windows-arm64.exe SHA256SUMS.txt GO-LICENSE.txt; do
+            digest="sha256:$(sha256sum "$file" | cut -d ' ' -f 1)"
+            jq -e --arg name "$file" --arg digest "$digest" '.assets | any(.name == $name and .state == "uploaded" and .digest == $digest)' "$release" > /dev/null
+          done
+          jq -r '.html_url, (.assets[] | "\(.name) \(.digest)")' "$release"

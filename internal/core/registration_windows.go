@@ -56,6 +56,31 @@ func checkBrowserRegistration() error {
 	return nil
 }
 
+// registrationExecutable preserves Scoop's verified current junction instead
+// of linking the registry to a version directory that Scoop can clean up.
+func registrationExecutable(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+
+	appDir := filepath.Dir(filepath.Dir(path))
+	if !filepath.IsAbs(path) ||
+		!strings.EqualFold(filepath.Base(path), "LinkSwitch.exe") ||
+		!strings.EqualFold(filepath.Base(appDir), "linkswitch") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(appDir)), "apps") {
+		return resolved, nil
+	}
+	current := filepath.Join(appDir, "current", "LinkSwitch.exe")
+	running, runningErr := os.Stat(resolved)
+	candidate, candidateErr := os.Stat(current)
+	if runningErr == nil && candidateErr == nil &&
+		candidate.Mode().IsRegular() && os.SameFile(running, candidate) {
+		return current, nil
+	}
+	return resolved, nil
+}
+
 // RegisterDefaultBrowser registers this executable as a possible HTTP(S)
 // handler for the current user. It does not assign it as the default.
 func RegisterDefaultBrowser() error {
@@ -63,7 +88,7 @@ func RegisterDefaultBrowser() error {
 	if err != nil {
 		return fmt.Errorf("LinkSwitch 本体を確認できません: %w", err)
 	}
-	path, err = filepath.EvalSymlinks(path)
+	path, err = registrationExecutable(path)
 	if err != nil {
 		return fmt.Errorf("LinkSwitch 本体を確認できません: %w", err)
 	}
